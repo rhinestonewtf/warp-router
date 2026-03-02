@@ -1,0 +1,426 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import { Test } from "forge-std/Test.sol";
+import { console } from "forge-std/console.sol";
+import { ITrustedExecution } from "@rhinestone/compact-utils/src/interfaces/ITrustedExecution.sol";
+import { IntentExecutor } from "@rhinestone/compact-utils/src/executor/IntentExecutor.sol";
+import { Execution } from "modulekit/integrations/ERC7579Exec.sol";
+import { IERC20 } from "forge-std/interfaces/IERC20.sol";
+import { MockTarget } from "@rhinestone/compact-utils/src/tests/MockTarget.sol";
+import { SkipSignatureCheckLib } from "@rhinestone/compact-utils/src/executor/TrustedExecution/lib/SkipSignatureCheck.sol";
+import { MockERC20 as Token } from "../../src/tests/MockERC20.sol";
+import { TheCompact } from "the-compact/TheCompact.sol";
+import { Router } from "../../src/router/Router.sol";
+import { AddressBook } from "../../src/common/AddressBook/AddressBook.sol";
+import { Constants } from "../../src/types/Constants.sol";
+import { MockPermit2 } from "./MockPermit2.sol";
+import { MockSmartAccount } from "./MockSmartAccount.sol";
+import { IPermit2IntentExecutor } from "@rhinestone/compact-utils/src/executor/interfaces/IPermit2Intent.sol";
+import { EIP712TypeHashLib } from "@rhinestone/compact-utils/src/types/EIP712TypeHashLib.sol";
+import { TestAllocator } from "../../src/tests/DebugAllocator.sol";
+
+// Mock target for testing function calls
+contract MockTargetLocal {
+    uint256 public param;
+
+    function targetFn(uint256 _param) external payable {
+        param = _param;
+    }
+}
+
+// Test helper for accessing internal functions and state
+contract TrustedExecutionTestHelper is IntentExecutor {
+    constructor(
+        address router,
+        address compact,
+        address allocator,
+        address addressBook
+    )
+        IntentExecutor(router, compact, allocator, addressBook)
+    { }
+
+    function isWhitelistedArbiter(address arbiter) external view returns (bool) {
+        return _isWhitelistedArbiter(arbiter);
+    }
+
+    function requireWithoutSignaturePermission(address arbiter, Execution[] calldata executions) external view {
+        _requireWithoutSignaturePermission(arbiter, executions);
+    }
+
+    function getSamechainArbiter() external view returns (address) {
+        return SAMECHAIN_ARBITER;
+    }
+
+    function setSignatureSkipPermission(address arbiter, bytes32 opsHash) external {
+        SkipSignatureCheckLib.setSignatureSkipPermission(arbiter, opsHash);
+    }
+
+    function hasSignatureSkipPermission(address arbiter, bytes32 opsHash) external view returns (bool) {
+        bytes32 slot = SkipSignatureCheckLib.getSlot(arbiter, opsHash);
+        return SkipSignatureCheckLib.load(slot) == 1;
+    }
+
+    function executeTargetOpsWithPermit2Stub(
+        address account,
+        IPermit2IntentExecutor.EIP712Permit2Stub calldata permit2Stub
+    )
+        external
+        override
+        returns (bytes32 permit2Hash)
+    {
+        // Mock implementation for testing
+        return bytes32(0);
+    }
+}
+
+contract TrustedExecutionTest is Test {
+    using SkipSignatureCheckLib for address;
+
+    TrustedExecutionTestHelper testHelper;
+    IntentExecutor intentExecutor;
+    address randomArbiter;
+
+    // Test contracts
+    Token token1;
+    Token token2;
+    Token token3;
+    MockSmartAccount smartAccount1;
+    MockSmartAccount smartAccount2;
+    MockTargetLocal target;
+    TheCompact compact;
+    Router router;
+    AddressBook addressBook;
+    TestAllocator allocator;
+
+    // Test addresses
+    address solver = makeAddr("solver");
+    address orchestrator = makeAddr("orchestrator");
+    address eoa = makeAddr("eoa");
+
+    bytes32 opsHash;
+
+    function setUp() public {
+        // Deploy a mock Permit2 contract at the expected address
+        MockPermit2 mockPermit2 = new MockPermit2();
+        bytes memory permit2Code = address(mockPermit2).code;
+        vm.etch(address(Constants.PERMIT2), permit2Code);
+
+        // Deploy basic contracts
+        token1 = new Token("Test Token 1", "TEST1", 18);
+        token2 = new Token("Test Token 2", "TEST2", 18);
+        token3 = new Token("Test Token 3", "TEST3", 18);
+        compact = new TheCompact();
+        router = new Router(solver, address(this), address(this));
+        addressBook = new AddressBook(address(this));
+        smartAccount1 = new MockSmartAccount();
+        smartAccount2 = new MockSmartAccount();
+        target = new MockTargetLocal();
+
+        // Pre-populate AddressBook with dummy addresses for the adapters
+        addressBook.setAddress(Constants.SAMECHAIN_ARBITER_ID, address(0x1234));
+
+        // Create a simple lock tag
+        allocator = new TestAllocator(address(compact), orchestrator, orchestrator);
+
+        // Deploy IntentExecutor
+        intentExecutor = new IntentExecutor(address(router), address(compact), address(allocator), address(addressBook));
+
+        // Deploy test helper
+        testHelper = new TrustedExecutionTestHelper(address(router), address(compact), address(allocator), address(addressBook));
+
+        // Fund accounts with tokens
+        token1.mint(address(smartAccount1), 1000 ether);
+        token2.mint(address(smartAccount1), 1000 ether);
+        token3.mint(address(smartAccount1), 1000 ether);
+
+        token1.mint(address(smartAccount2), 1000 ether);
+        token2.mint(address(smartAccount2), 1000 ether);
+        token3.mint(address(smartAccount2), 1000 ether);
+
+        // Create a random arbiter address for testing
+        randomArbiter = makeAddr("randomArbiter");
+
+        opsHash = keccak256("opsHash");
+    }
+
+    function test_executeWithoutSignature_whitelistedArbiter() public {
+        address account = address(smartAccount1);
+        uint256 amount = 100 ether;
+
+        // Prepare executions
+        Execution[] memory executions = new Execution[](1);
+        executions[0] = Execution({ target: address(token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (solver, amount)) });
+
+        // Record balances before execution
+        uint256 accountBalanceBefore = token1.balanceOf(account);
+        uint256 solverBalanceBefore = token1.balanceOf(solver);
+
+        // Get whitelisted arbiter (same chain arbiter)
+        address whitelistedArbiter = testHelper.getSamechainArbiter();
+
+        // Execute from whitelisted arbiter - should succeed without permission
+        vm.prank(whitelistedArbiter);
+        intentExecutor.executeWithoutSignature(account, executions);
+
+        // Verify execution
+        assertEq(token1.balanceOf(account), accountBalanceBefore - amount, "Account balance incorrect");
+        assertEq(token1.balanceOf(solver), solverBalanceBefore + amount, "Solver balance incorrect");
+    }
+
+    function test_executeWithoutSignature_nonWhitelistedWithPermission() public {
+        address account = address(smartAccount1);
+        uint256 amount = 75 ether;
+
+        Execution[] memory executions = new Execution[](1);
+        executions[0] = Execution({ target: address(token3), value: 0, callData: abi.encodeCall(IERC20.transfer, (orchestrator, amount)) });
+
+        // Grant signature skip permission to random arbiter
+        testHelper.setSignatureSkipPermission(randomArbiter, operationsM(executions));
+
+        // Verify permission was granted
+        assertTrue(testHelper.hasSignatureSkipPermission(randomArbiter, operationsM(executions)), "Permission should be granted");
+
+        // Record balances before execution
+        uint256 accountBalanceBefore = token3.balanceOf(account);
+        uint256 orchestratorBalanceBefore = token3.balanceOf(orchestrator);
+
+        // Execute from non-whitelisted arbiter with permission - should succeed
+        // Use testHelper instead of intentExecutor since the permission was set on testHelper
+        vm.prank(randomArbiter);
+        testHelper.executeWithoutSignature(account, executions);
+
+        // Verify execution
+        assertEq(token3.balanceOf(account), accountBalanceBefore - amount, "Account balance incorrect");
+        assertEq(token3.balanceOf(orchestrator), orchestratorBalanceBefore + amount, "Orchestrator balance incorrect");
+    }
+
+    function test_executeWithoutSignature_revertNonWhitelistedWithoutPermission() public {
+        address account = address(smartAccount1);
+
+        Execution[] memory executions = new Execution[](1);
+        executions[0] = Execution({ target: address(token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (solver, 100 ether)) });
+
+        // Verify random arbiter has no permission
+        assertFalse(testHelper.hasSignatureSkipPermission(randomArbiter, operationsM(executions)), "Permission should not be granted");
+
+        // Should revert with InvalidPermission error
+        vm.prank(randomArbiter);
+        vm.expectRevert(SkipSignatureCheckLib.InvalidPermission.selector);
+        intentExecutor.executeWithoutSignature(account, executions);
+    }
+
+    function test_executeWithoutSignature_batchOperations() public {
+        address account = address(smartAccount1);
+        uint256 amount1 = 25 ether;
+        uint256 amount2 = 35 ether;
+
+        // Prepare batch executions
+        Execution[] memory executions = new Execution[](3);
+        executions[0] = Execution({ target: address(token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (solver, amount1)) });
+        executions[1] = Execution({ target: address(token2), value: 0, callData: abi.encodeCall(IERC20.transfer, (orchestrator, amount2)) });
+        executions[2] = Execution({ target: address(target), value: 0, callData: abi.encodeCall(target.targetFn, (54_321)) });
+
+        // Use whitelisted arbiter
+        address whitelistedArbiter = testHelper.getSamechainArbiter();
+
+        // Record state before execution
+        uint256 token1BalanceBefore = token1.balanceOf(account);
+        uint256 token2BalanceBefore = token2.balanceOf(account);
+        uint256 targetParamBefore = target.param();
+
+        // Execute batch operations
+        vm.prank(whitelistedArbiter);
+        intentExecutor.executeWithoutSignature(account, executions);
+
+        // Verify batch execution
+        assertEq(token1.balanceOf(account), token1BalanceBefore - amount1, "Token1 balance incorrect");
+        assertEq(token2.balanceOf(account), token2BalanceBefore - amount2, "Token2 balance incorrect");
+        assertEq(token1.balanceOf(solver), amount1, "Solver token1 balance incorrect");
+        assertEq(token2.balanceOf(orchestrator), amount2, "Orchestrator token2 balance incorrect");
+        assertEq(target.param(), 54_321, "Target function not called");
+    }
+
+    function test_isWhitelistedArbiter_samechainArbiter() public {
+        address samechainArbiter = testHelper.getSamechainArbiter();
+        assertTrue(testHelper.isWhitelistedArbiter(samechainArbiter), "Samechain arbiter should be whitelisted");
+    }
+
+    function test_isWhitelistedArbiter_randomAddress() public {
+        assertFalse(testHelper.isWhitelistedArbiter(randomArbiter), "Random arbiter should not be whitelisted");
+        assertFalse(testHelper.isWhitelistedArbiter(address(0)), "Zero address should not be whitelisted");
+        assertFalse(testHelper.isWhitelistedArbiter(address(this)), "This contract should not be whitelisted");
+    }
+
+    function test_requireWithoutSignaturePermission_whitelistedArbiter() public {
+        address whitelistedArbiter = testHelper.getSamechainArbiter();
+
+        // Create dummy executions for testing
+        Execution[] memory executions = new Execution[](1);
+        executions[0] = Execution({ target: address(0), value: 0, callData: "" });
+
+        // Should not revert for whitelisted arbiter
+        testHelper.requireWithoutSignaturePermission(whitelistedArbiter, executions);
+    }
+
+    function test_requireWithoutSignaturePermission_nonWhitelistedWithPermission() public {
+        // Create dummy executions for testing
+        Execution[] memory executions = new Execution[](1);
+        executions[0] = Execution({ target: address(0), value: 0, callData: "" });
+
+        // Grant permission to random arbiter
+        testHelper.setSignatureSkipPermission(randomArbiter, operationsM(executions));
+
+        // Should not revert for arbiter with permission
+        testHelper.requireWithoutSignaturePermission(randomArbiter, executions);
+    }
+
+    function test_requireWithoutSignaturePermission_revertNonWhitelistedWithoutPermission() public {
+        // Create dummy executions for testing
+        Execution[] memory executions = new Execution[](1);
+        executions[0] = Execution({ target: address(0), value: 0, callData: "" });
+
+        // Should revert for non-whitelisted arbiter without permission
+        vm.expectRevert(SkipSignatureCheckLib.InvalidPermission.selector);
+        testHelper.requireWithoutSignaturePermission(randomArbiter, executions);
+    }
+
+    function test_executeWithoutSignature_multipleAccounts() public {
+        uint256 amount1 = 40 ether;
+        uint256 amount2 = 60 ether;
+
+        // Account 1 operations
+        Execution[] memory executions1 = new Execution[](1);
+        executions1[0] = Execution({ target: address(token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (solver, amount1)) });
+
+        // Account 2 operations
+        Execution[] memory executions2 = new Execution[](1);
+        executions2[0] =
+            Execution({ target: address(token2), value: 0, callData: abi.encodeCall(IERC20.transfer, (orchestrator, amount2)) });
+
+        address whitelistedArbiter = testHelper.getSamechainArbiter();
+
+        // Record balances before execution
+        uint256 account1Token1BalanceBefore = token1.balanceOf(address(smartAccount1));
+        uint256 account2Token2BalanceBefore = token2.balanceOf(address(smartAccount2));
+
+        // Execute for both accounts
+        vm.startPrank(whitelistedArbiter);
+        intentExecutor.executeWithoutSignature(address(smartAccount1), executions1);
+        intentExecutor.executeWithoutSignature(address(smartAccount2), executions2);
+        vm.stopPrank();
+
+        // Verify executions
+        assertEq(token1.balanceOf(address(smartAccount1)), account1Token1BalanceBefore - amount1, "Account1 balance incorrect");
+        assertEq(token2.balanceOf(address(smartAccount2)), account2Token2BalanceBefore - amount2, "Account2 balance incorrect");
+        assertEq(token1.balanceOf(solver), amount1, "Solver token1 balance incorrect");
+        assertEq(token2.balanceOf(orchestrator), amount2, "Orchestrator token2 balance incorrect");
+    }
+
+    function test_signatureSkipPermission_doubleSet() public {
+        // Create dummy executions for testing
+        Execution[] memory executions = new Execution[](1);
+        executions[0] = Execution({ target: address(0), value: 0, callData: "" });
+        bytes32 executionsHash = operationsM(executions);
+
+        // Grant permission first time - should succeed
+        testHelper.setSignatureSkipPermission(randomArbiter, executionsHash);
+        assertTrue(testHelper.hasSignatureSkipPermission(randomArbiter, executionsHash), "Permission should be granted");
+
+        // Try to grant permission again - should revert
+        vm.expectRevert(SkipSignatureCheckLib.InvalidPermission.selector);
+        testHelper.setSignatureSkipPermission(randomArbiter, executionsHash);
+    }
+
+    function test_executeWithoutSignature_withETHTransfer() public {
+        address account = address(smartAccount1);
+
+        // Fund account with ETH
+        vm.deal(account, 5 ether);
+
+        Execution[] memory executions = new Execution[](2);
+        executions[0] = Execution({ target: solver, value: 1 ether, callData: "" });
+        executions[1] = Execution({ target: address(target), value: 0.5 ether, callData: abi.encodeCall(target.targetFn, (11_111)) });
+
+        address whitelistedArbiter = testHelper.getSamechainArbiter();
+
+        uint256 solverBalanceBefore = solver.balance;
+        uint256 targetBalanceBefore = address(target).balance;
+
+        // Execute with ETH transfers
+        vm.prank(whitelistedArbiter);
+        intentExecutor.executeWithoutSignature(account, executions);
+
+        // Verify ETH transfers and function call
+        assertEq(solver.balance, solverBalanceBefore + 1 ether, "Solver ETH balance incorrect");
+        assertEq(address(target).balance, targetBalanceBefore + 0.5 ether, "Target ETH balance incorrect");
+        assertEq(target.param(), 11_111, "Target function not called");
+    }
+
+    function testFuzz_executeWithoutSignature_variousAmounts(uint256 amount) public {
+        amount = bound(amount, 1 ether, 100 ether);
+        address account = address(smartAccount1);
+
+        Execution[] memory executions = new Execution[](1);
+        executions[0] = Execution({ target: address(token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (solver, amount)) });
+
+        address whitelistedArbiter = testHelper.getSamechainArbiter();
+
+        uint256 balanceBefore = token1.balanceOf(solver);
+
+        // Execute with fuzzed amount
+        vm.prank(whitelistedArbiter);
+        intentExecutor.executeWithoutSignature(account, executions);
+
+        // Verify execution
+        assertEq(token1.balanceOf(solver), balanceBefore + amount, "Fuzzed amount transfer incorrect");
+    }
+
+    function testFuzz_signatureSkipPermission_variousArbiters(address arbiter) public {
+        vm.assume(arbiter != address(0));
+        vm.assume(!testHelper.isWhitelistedArbiter(arbiter));
+        // Create dummy executions for testing
+        Execution[] memory executions = new Execution[](1);
+        executions[0] = Execution({ target: address(0), value: 0, callData: "" });
+        bytes32 executionsHash = operationsM(executions);
+
+        vm.assume(!testHelper.hasSignatureSkipPermission(arbiter, executionsHash));
+
+        // Grant permission to fuzzed arbiter
+        testHelper.setSignatureSkipPermission(arbiter, executionsHash);
+
+        // Verify permission was granted
+        assertTrue(testHelper.hasSignatureSkipPermission(arbiter, executionsHash), "Fuzzed arbiter should have permission");
+
+        // Should not revert when checking permission
+        testHelper.requireWithoutSignaturePermission(arbiter, executions);
+    }
+
+    function test_executeWithoutSignature_emptyExecutions() public {
+        address account = address(smartAccount1);
+        address whitelistedArbiter = testHelper.getSamechainArbiter();
+
+        // Empty executions array
+        Execution[] memory executions = new Execution[](0);
+
+        // Should not revert with empty executions
+        vm.prank(whitelistedArbiter);
+        intentExecutor.executeWithoutSignature(account, executions);
+    }
+
+    function operationM(Execution memory _execution) internal pure returns (bytes32) {
+        return
+            keccak256(abi.encode(EIP712TypeHashLib.TYPEHASH_OPERATION, _execution.target, _execution.value, keccak256(_execution.callData)));
+    }
+
+    function operationsM(Execution[] memory _executions) internal pure returns (bytes32) {
+        uint256 length = _executions.length;
+        if (length == 0) return Constants.NO_EXEC;
+
+        bytes32[] memory a = new bytes32[](length);
+        for (uint256 i; i < length; i++) {
+            a[i] = operationM(_executions[i]);
+        }
+        return keccak256(abi.encodePacked(a));
+    }
+}

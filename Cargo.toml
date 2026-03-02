@@ -1,0 +1,27 @@
+
+[package]
+name = "arbiter"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "arbiter"
+path = "rust/main.rs"
+
+[lib]
+path = "rust/lib.rs"
+
+[dependencies]
+alloy = { version = "0.9.2", features = ["sol-types", "serde", "dyn-abi"] }
+
+# async
+futures-util = "0.3"
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+
+# misc
+eyre = "0.6"
+serde = "1.0"
+serde_json = "1.0"
+clap = { version = "4.3.0", features = ["derive"] }
+hex = "0.4.3"
+

@@ -1,0 +1,9 @@
+{
+  "claimSelectors": [
+    "0x6b082b2a"
+  ],
+  "fillSelectors": [
+    "0x28bcd392",
+    "0xdfc3f395"
+  ]
+}

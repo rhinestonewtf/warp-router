@@ -1,0 +1,697 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.27;
+
+import { Test } from "forge-std/Test.sol";
+import { console2 } from "forge-std/console2.sol";
+import { Types } from "@rhinestone/compact-utils/src/types/OrderTypes.sol";
+import { Execution } from "modulekit/integrations/ERC7579Exec.sol";
+import { Hasher } from "../../src/tests/Hasher.sol";
+import { HasherOptimized } from "../../src/tests/HasherOptimized.sol";
+
+contract EIP712TypeHashOptimizationTest is Test {
+    Hasher original;
+    HasherOptimized optimized;
+
+    function setUp() public {
+        original = new Hasher();
+        optimized = new HasherOptimized();
+    }
+
+    function testHashEquivalence_TokenIn_Single() public {
+        uint256[2][] memory tokenIn = new uint256[2][](1);
+        tokenIn[0] = [uint256(uint160(address(0x123))) | (uint256(0x456) << 160), 1000];
+
+        bytes32 originalHash = original.hashTokenIn(tokenIn);
+        bytes32 optimizedHash = optimized.hashTokenIn(tokenIn);
+
+        assertEq(originalHash, optimizedHash, "Single token hash mismatch");
+    }
+
+    function testHashEquivalence_TokenIn_Multiple() public {
+        uint256[2][] memory tokenIn = new uint256[2][](3);
+        tokenIn[0] = [uint256(uint160(address(0x123))) | (uint256(0x456) << 160), 1000];
+        tokenIn[1] = [uint256(uint160(address(0x789))) | (uint256(0xabc) << 160), 2000];
+        tokenIn[2] = [uint256(uint160(address(0xdef))) | (uint256(0x123) << 160), 3000];
+
+        bytes32 originalHash = original.hashTokenIn(tokenIn);
+        bytes32 optimizedHash = optimized.hashTokenIn(tokenIn);
+
+        assertEq(originalHash, optimizedHash, "Multiple token hash mismatch");
+    }
+
+    function testHashEquivalence_TokenOut_Single() public {
+        uint256[2][] memory tokenOut = new uint256[2][](1);
+        tokenOut[0] = [uint256(uint160(address(0x123))), 1000];
+
+        bytes32 originalHash = original.hashTokenOut(tokenOut);
+        bytes32 optimizedHash = optimized.hashTokenOut(tokenOut);
+
+        assertEq(originalHash, optimizedHash, "Single token out hash mismatch");
+    }
+
+    function testHashEquivalence_TokenOut_Multiple() public {
+        uint256[2][] memory tokenOut = new uint256[2][](3);
+        tokenOut[0] = [uint256(uint160(address(0x123))), 1000];
+        tokenOut[1] = [uint256(uint160(address(0x789))), 2000];
+        tokenOut[2] = [uint256(uint160(address(0xdef))), 3000];
+
+        bytes32 originalHash = original.hashTokenOut(tokenOut);
+        bytes32 optimizedHash = optimized.hashTokenOut(tokenOut);
+
+        assertEq(originalHash, optimizedHash, "Multiple token out hash mismatch");
+    }
+
+    function testHashEquivalence_Compact() public {
+        bytes32[] memory allElements = new bytes32[](3);
+        allElements[0] = keccak256("element1");
+        allElements[1] = keccak256("element2");
+        allElements[2] = keccak256("element3");
+
+        bytes32 originalHash = original.hashCompact(
+            Types.Order({
+                sponsor: address(0x1),
+                recipient: address(0x2),
+                nonce: 1,
+                expires: block.timestamp + 1000,
+                fillDeadline: block.timestamp + 500,
+                notarizedChainId: 1,
+                targetChainId: 1,
+                tokenIn: new uint256[2][](0),
+                tokenOut: new uint256[2][](0),
+                preClaimOps: Types.Operation({ data: "" }),
+                targetOps: Types.Operation({ data: "" }),
+                qualifier: ""
+            }),
+            allElements
+        );
+        bytes32 optimizedHash = optimized.hashCompact(
+            Types.Order({
+                sponsor: address(0x1),
+                recipient: address(0x2),
+                nonce: 1,
+                expires: block.timestamp + 1000,
+                fillDeadline: block.timestamp + 500,
+                notarizedChainId: 1,
+                targetChainId: 1,
+                tokenIn: new uint256[2][](0),
+                tokenOut: new uint256[2][](0),
+                preClaimOps: Types.Operation({ data: "" }),
+                targetOps: Types.Operation({ data: "" }),
+                qualifier: ""
+            }),
+            allElements
+        );
+
+        assertEq(originalHash, optimizedHash, "Compact hash mismatch");
+    }
+
+    function testHashEquivalence_Qualifier() public {
+        bytes memory data1 = "test qualifier data";
+        bytes memory data2 = abi.encode("complex", "qualifier", 123, address(0x456));
+        bytes memory data3 = "";
+
+        assertEq(original.hashQualifier(data1), optimized.hashQualifier(data1), "Qualifier hash mismatch 1");
+        assertEq(original.hashQualifier(data2), optimized.hashQualifier(data2), "Qualifier hash mismatch 2");
+        assertEq(original.hashQualifier(data3), optimized.hashQualifier(data3), "Qualifier hash mismatch 3");
+    }
+
+    function testHashEquivalence_TargetAttributes() public {
+        Types.Order memory order = Types.Order({
+            sponsor: address(0x1),
+            recipient: address(0x2),
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: new uint256[2][](0),
+            tokenOut: new uint256[2][](0),
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: ""
+        });
+
+        bytes32 originalHash = original.hashTargetAttributes(order);
+        bytes32 optimizedHash = optimized.hashTargetAttributes(order);
+
+        assertEq(originalHash, optimizedHash, "TargetAttributes hash mismatch");
+    }
+
+    function testHashEquivalence_Element() public {
+        uint256[2][] memory tokenIn = new uint256[2][](2);
+        tokenIn[0] = [uint256(uint160(address(0x123))) | (uint256(0x456) << 160), 1000];
+        tokenIn[1] = [uint256(uint160(address(0x789))) | (uint256(0xabc) << 160), 2000];
+
+        uint256[2][] memory tokenOut = new uint256[2][](2);
+        tokenOut[0] = [uint256(uint160(address(0x111))), 1500];
+        tokenOut[1] = [uint256(uint160(address(0x222))), 2500];
+
+        Types.Order memory order = Types.Order({
+            sponsor: address(0x1),
+            recipient: address(0x2),
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: ""
+        });
+
+        address arbiter = address(0x888);
+        uint256 originChainId = 2;
+        bytes32 originalHash = original.hashElement(order, arbiter, originChainId);
+        bytes32 optimizedHash = optimized.hashElement(order, arbiter, originChainId);
+
+        assertEq(originalHash, optimizedHash, "Element hash mismatch");
+    }
+
+    function testHashEquivalence_Mandate() public {
+        uint256[2][] memory tokenOut = new uint256[2][](1);
+        tokenOut[0] = [uint256(uint160(address(0x111))), 1500];
+
+        Types.Order memory order = Types.Order({
+            sponsor: address(0x1),
+            recipient: address(0x2),
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: new uint256[2][](0),
+            tokenOut: tokenOut,
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: "test qualifier"
+        });
+
+        bytes32 originalHash = original.hashMandate(order);
+        bytes32 optimizedHash = optimized.hashMandate(order);
+
+        assertEq(originalHash, optimizedHash, "Mandate hash mismatch");
+    }
+
+    function testHashEquivalence_Ops() public {
+        Execution[] memory execs = new Execution[](2);
+        execs[0] = Execution({
+            target: address(0x111),
+            value: 100,
+            callData: abi.encodeWithSignature("transfer(address,uint256)", address(0x222), 1000)
+        });
+        execs[1] = Execution({
+            target: address(0x333),
+            value: 200,
+            callData: abi.encodeWithSignature("approve(address,uint256)", address(0x444), 2000)
+        });
+
+        bytes32 originalHash = original.hashOps(execs);
+        bytes32 optimizedHash = optimized.hashOps(execs);
+
+        assertEq(originalHash, optimizedHash, "Ops hash mismatch");
+    }
+
+    function testGasComparison_Ops() public {
+        Execution[] memory execs = new Execution[](3);
+        execs[0] = Execution({
+            target: address(0x111),
+            value: 100,
+            callData: abi.encodeWithSignature("transfer(address,uint256)", address(0x222), 1000)
+        });
+        execs[1] = Execution({
+            target: address(0x333),
+            value: 200,
+            callData: abi.encodeWithSignature("approve(address,uint256)", address(0x444), 2000)
+        });
+        execs[2] = Execution({ target: address(0x555), value: 0, callData: abi.encodeWithSignature("deposit()", "") });
+
+        uint256 originalGas = original.measureOpsGas(execs);
+        uint256 optimizedGas = optimized.measureOpsGas(execs);
+
+        console2.log("=== Operations Gas Comparison (3 operations) ===");
+        console2.log("Original gas:", originalGas);
+        console2.log("Optimized gas:", optimizedGas);
+        console2.log("Gas savings:", originalGas - optimizedGas);
+        console2.log("Percent savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+
+        assertLt(optimizedGas, originalGas, "Optimized version should use less gas");
+    }
+
+    function testGasComparison_TokenIn_Small() public {
+        uint256[2][] memory tokenIn = new uint256[2][](2);
+        tokenIn[0] = [uint256(uint160(address(0x123))) | (uint256(0x456) << 160), 1000];
+        tokenIn[1] = [uint256(uint160(address(0x789))) | (uint256(0xabc) << 160), 2000];
+
+        uint256 originalGas = original.measureTokenInGas(tokenIn);
+        uint256 optimizedGas = optimized.measureTokenInGas(tokenIn);
+
+        console2.log("=== TokenIn Gas Comparison (2 tokens) ===");
+        console2.log("Original gas:", originalGas);
+        console2.log("Optimized gas:", optimizedGas);
+        console2.log("Gas savings:", originalGas - optimizedGas);
+        console2.log("Percent savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+
+        assertLt(optimizedGas, originalGas, "Optimized version should use less gas");
+    }
+
+    function testGasComparison_TokenIn_Large() public {
+        uint256[2][] memory tokenIn = new uint256[2][](10);
+        for (uint256 i = 0; i < 10; i++) {
+            tokenIn[i] = [uint256(uint160(address(uint160(0x123 + i)))) | (uint256(0x456 + i) << 160), 1000 + i];
+        }
+
+        uint256 originalGas = original.measureTokenInGas(tokenIn);
+        uint256 optimizedGas = optimized.measureTokenInGas(tokenIn);
+
+        console2.log("=== TokenIn Gas Comparison (10 tokens) ===");
+        console2.log("Original gas:", originalGas);
+        console2.log("Optimized gas:", optimizedGas);
+        console2.log("Gas savings:", originalGas - optimizedGas);
+        console2.log("Percent savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+
+        assertLt(optimizedGas, originalGas, "Optimized version should use less gas");
+    }
+
+    function testGasComparison_TokenOut_Small() public {
+        uint256[2][] memory tokenOut = new uint256[2][](2);
+        tokenOut[0] = [uint256(uint160(address(0x123))), 1000];
+        tokenOut[1] = [uint256(uint160(address(0x789))), 2000];
+
+        uint256 originalGas = original.measureTokenOutGas(tokenOut);
+        uint256 optimizedGas = optimized.measureTokenOutGas(tokenOut);
+
+        console2.log("=== TokenOut Gas Comparison (2 tokens) ===");
+        console2.log("Original gas:", originalGas);
+        console2.log("Optimized gas:", optimizedGas);
+        console2.log("Gas savings:", originalGas - optimizedGas);
+        console2.log("Percent savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+
+        assertLt(optimizedGas, originalGas, "Optimized version should use less gas");
+    }
+
+    function testGasComparison_TokenOut_Large() public {
+        uint256[2][] memory tokenOut = new uint256[2][](10);
+        for (uint256 i = 0; i < 10; i++) {
+            tokenOut[i] = [uint256(uint160(address(uint160(0x123 + i)))), 1000 + i];
+        }
+
+        uint256 originalGas = original.measureTokenOutGas(tokenOut);
+        uint256 optimizedGas = optimized.measureTokenOutGas(tokenOut);
+
+        console2.log("=== TokenOut Gas Comparison (10 tokens) ===");
+        console2.log("Original gas:", originalGas);
+        console2.log("Optimized gas:", optimizedGas);
+        console2.log("Gas savings:", originalGas - optimizedGas);
+        console2.log("Percent savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+
+        assertLt(optimizedGas, originalGas, "Optimized version should use less gas");
+    }
+
+    function testGasComparison_Compact() public {
+        bytes32[] memory allElements = new bytes32[](5);
+        for (uint256 i = 0; i < 5; i++) {
+            allElements[i] = keccak256(abi.encode("element", i));
+        }
+
+        Types.Order memory order = Types.Order({
+            sponsor: address(0x1),
+            recipient: address(0x2),
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: new uint256[2][](0),
+            tokenOut: new uint256[2][](0),
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: ""
+        });
+        uint256 originalGas = original.measureCompactGas(order, allElements);
+        uint256 optimizedGas = optimized.measureCompactGas(order, allElements);
+
+        console2.log("=== Compact Gas Comparison (5 elements) ===");
+        console2.log("Original gas:", originalGas);
+        console2.log("Optimized gas:", optimizedGas);
+        console2.log("Gas savings:", originalGas - optimizedGas);
+        console2.log("Percent savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+
+        assertLt(optimizedGas, originalGas, "Optimized version should use less gas");
+    }
+
+    function testGasComparison_Element() public {
+        uint256[2][] memory tokenIn = new uint256[2][](3);
+        tokenIn[0] = [uint256(uint160(address(0x123))) | (uint256(0x456) << 160), 1000];
+        tokenIn[1] = [uint256(uint160(address(0x789))) | (uint256(0xabc) << 160), 2000];
+        tokenIn[2] = [uint256(uint160(address(0xdef))) | (uint256(0x123) << 160), 3000];
+
+        uint256[2][] memory tokenOut = new uint256[2][](2);
+        tokenOut[0] = [uint256(uint160(address(0x111))), 1500];
+        tokenOut[1] = [uint256(uint160(address(0x222))), 2500];
+
+        Types.Order memory order = Types.Order({
+            sponsor: address(0x1),
+            recipient: address(0x2),
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: "test qualifier"
+        });
+
+        address arbiter = address(0x888);
+        uint256 originChainId = 2;
+        uint256 originalGas = original.measureElementGas(order, arbiter, originChainId);
+        uint256 optimizedGas = optimized.measureElementGas(order, arbiter, originChainId);
+
+        console2.log("=== Element Gas Comparison ===");
+        console2.log("Original gas:", originalGas);
+        console2.log("Optimized gas:", optimizedGas);
+        console2.log("Gas savings:", originalGas - optimizedGas);
+        console2.log("Percent savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+
+        assertLt(optimizedGas, originalGas, "Optimized version should use less gas");
+    }
+
+    function testGasComparison_Mandate() public {
+        uint256[2][] memory tokenOut = new uint256[2][](2);
+        tokenOut[0] = [uint256(uint160(address(0x111))), 1500];
+        tokenOut[1] = [uint256(uint160(address(0x222))), 2500];
+
+        Types.Order memory order = Types.Order({
+            sponsor: address(0x1),
+            recipient: address(0x2),
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: new uint256[2][](0),
+            tokenOut: tokenOut,
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: "test qualifier"
+        });
+
+        uint256 originalGas = original.measureMandateGas(order);
+        uint256 optimizedGas = optimized.measureMandateGas(order);
+
+        console2.log("=== Mandate Gas Comparison ===");
+        console2.log("Original gas:", originalGas);
+        console2.log("Optimized gas:", optimizedGas);
+        console2.log("Gas savings:", originalGas - optimizedGas);
+        console2.log("Percent savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+
+        assertLt(optimizedGas, originalGas, "Optimized version should use less gas");
+    }
+
+    function testGasComparison_TargetAttributes() public {
+        uint256[2][] memory tokenOut = new uint256[2][](2);
+        tokenOut[0] = [uint256(uint160(address(0x111))), 1500];
+        tokenOut[1] = [uint256(uint160(address(0x222))), 2500];
+
+        Types.Order memory order = Types.Order({
+            sponsor: address(0x1),
+            recipient: address(0x2),
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: new uint256[2][](0),
+            tokenOut: tokenOut,
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: ""
+        });
+
+        uint256 originalGas = original.measureTargetAttributesGas(order);
+        uint256 optimizedGas = optimized.measureTargetAttributesGas(order);
+
+        console2.log("=== TargetAttributes Gas Comparison ===");
+        console2.log("Original gas:", originalGas);
+        console2.log("Optimized gas:", optimizedGas);
+        console2.log("Gas savings:", originalGas - optimizedGas);
+        console2.log("Percent savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+
+        assertLt(optimizedGas, originalGas, "Optimized version should use less gas");
+    }
+
+    function testFuzzHashEquivalence_TokenIn(uint256[2][] calldata tokenIn) public {
+        vm.assume(tokenIn.length > 0 && tokenIn.length <= 10);
+
+        // Ensure valid addresses in the packed format
+        for (uint256 i = 0; i < tokenIn.length; i++) {
+            vm.assume(uint160(tokenIn[i][0]) != 0);
+            vm.assume(tokenIn[i][1] > 0);
+        }
+
+        bytes32 originalHash = original.hashTokenIn(tokenIn);
+        bytes32 optimizedHash = optimized.hashTokenIn(tokenIn);
+
+        assertEq(originalHash, optimizedHash, "Fuzz: TokenIn hash mismatch");
+    }
+
+    function testFuzzHashEquivalence_TokenOut(uint256[2][] calldata tokenOut) public {
+        vm.assume(tokenOut.length > 0 && tokenOut.length <= 10);
+
+        // Ensure valid addresses
+        for (uint256 i = 0; i < tokenOut.length; i++) {
+            vm.assume(uint160(tokenOut[i][0]) != 0);
+            vm.assume(tokenOut[i][1] > 0);
+        }
+
+        bytes32 originalHash = original.hashTokenOut(tokenOut);
+        bytes32 optimizedHash = optimized.hashTokenOut(tokenOut);
+
+        assertEq(originalHash, optimizedHash, "Fuzz: TokenOut hash mismatch");
+    }
+
+    function testFuzzHashEquivalence_Compact(address sponsor, address recipient, uint256 nonce, bytes32[] calldata allElements) public {
+        vm.assume(sponsor != address(0));
+        vm.assume(recipient != address(0));
+        vm.assume(allElements.length > 0 && allElements.length <= 5);
+
+        // Ensure all elements are non-zero
+        for (uint256 i = 0; i < allElements.length; i++) {
+            vm.assume(allElements[i] != bytes32(0));
+        }
+
+        Types.Order memory order = Types.Order({
+            sponsor: sponsor,
+            recipient: recipient,
+            nonce: nonce,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: new uint256[2][](0),
+            tokenOut: new uint256[2][](0),
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: ""
+        });
+
+        bytes32 originalHash = original.hashCompact(order, allElements);
+        bytes32 optimizedHash = optimized.hashCompact(order, allElements);
+
+        assertEq(originalHash, optimizedHash, "Fuzz: Compact hash mismatch");
+    }
+
+    function testFuzzHashEquivalence_TargetAttributes(
+        address recipient,
+        uint256 targetChainId,
+        uint256 fillDeadline,
+        uint256[2][] calldata tokenOut
+    )
+        public
+    {
+        vm.assume(recipient != address(0));
+        vm.assume(targetChainId > 0 && targetChainId <= 1000);
+        vm.assume(fillDeadline > block.timestamp);
+        vm.assume(tokenOut.length <= 20);
+
+        // Ensure valid tokenOut addresses
+        for (uint256 i = 0; i < tokenOut.length; i++) {
+            vm.assume(uint160(tokenOut[i][0]) != 0);
+            vm.assume(tokenOut[i][1] > 0);
+        }
+
+        Types.Order memory order = Types.Order({
+            sponsor: address(0x1),
+            recipient: recipient,
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: fillDeadline,
+            notarizedChainId: 1,
+            targetChainId: targetChainId,
+            tokenIn: new uint256[2][](0),
+            tokenOut: tokenOut,
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: ""
+        });
+
+        bytes32 originalHash = original.hashTargetAttributes(order);
+        bytes32 optimizedHash = optimized.hashTargetAttributes(order);
+
+        assertEq(originalHash, optimizedHash, "Fuzz: TargetAttributes hash mismatch");
+    }
+
+    function testFuzzHashEquivalence_Element(address arbiter, uint256 originChainId) public {
+        vm.assume(arbiter != address(0));
+        vm.assume(originChainId > 0);
+
+        // Create simple test data
+        uint256[2][] memory tokenIn = new uint256[2][](1);
+        uint256[2][] memory tokenOut = new uint256[2][](1);
+        tokenIn[0] = [uint256(uint160(address(0x123))) | (uint256(0x456) << 160), 1000];
+        tokenOut[0] = [uint256(uint160(address(0x789))), 2000];
+
+        Types.Order memory order = Types.Order({
+            sponsor: address(0x1),
+            recipient: address(0x2),
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: ""
+        });
+
+        bytes32 originalHash = original.hashElement(order, arbiter, originChainId);
+        bytes32 optimizedHash = optimized.hashElement(order, arbiter, originChainId);
+
+        assertEq(originalHash, optimizedHash, "Fuzz: Element hash mismatch");
+    }
+
+    function testFuzzHashEquivalence_EdgeCases(uint256 seed) public {
+        seed = bound(seed, 1, type(uint128).max);
+
+        // Test various edge cases using seed for deterministic randomness
+        uint256 arraySize = (seed % 5) + 1; // 1-5 elements
+
+        uint256[2][] memory tokenIn = new uint256[2][](arraySize);
+        uint256[2][] memory tokenOut = new uint256[2][](arraySize);
+
+        for (uint256 i = 0; i < arraySize; i++) {
+            // Use seed to generate deterministic but varied test data
+            uint256 baseSeed = seed + i * 1000;
+
+            // TokenIn with lockTag
+            tokenIn[i] = [
+                uint256(uint160(address(uint160((baseSeed % 1_000_000) + 1)))) | ((baseSeed + 1) << 160), // lockTag
+                (baseSeed % 1_000_000) + 1 // amount
+            ];
+
+            // TokenOut without lockTag
+            tokenOut[i] = [uint256(uint160(address(uint160(((baseSeed + 2) % 1_000_000) + 1)))), ((baseSeed + 3) % 1_000_000) + 1];
+        }
+
+        bytes32 originalTokenInHash = original.hashTokenIn(tokenIn);
+        bytes32 optimizedTokenInHash = optimized.hashTokenIn(tokenIn);
+        assertEq(originalTokenInHash, optimizedTokenInHash, "Edge case: TokenIn hash mismatch");
+
+        bytes32 originalTokenOutHash = original.hashTokenOut(tokenOut);
+        bytes32 optimizedTokenOutHash = optimized.hashTokenOut(tokenOut);
+        assertEq(originalTokenOutHash, optimizedTokenOutHash, "Edge case: TokenOut hash mismatch");
+    }
+
+    function testEmptyArrays() public {
+        uint256[2][] memory emptyTokenIn = new uint256[2][](0);
+        uint256[2][] memory emptyTokenOut = new uint256[2][](0);
+        bytes32[] memory emptyElements = new bytes32[](0);
+
+        // Test empty arrays produce same hashes
+        bytes32 originalTokenInHash = original.hashTokenIn(emptyTokenIn);
+        bytes32 optimizedTokenInHash = optimized.hashTokenIn(emptyTokenIn);
+        assertEq(originalTokenInHash, optimizedTokenInHash, "Empty tokenIn hash mismatch");
+
+        bytes32 originalTokenOutHash = original.hashTokenOut(emptyTokenOut);
+        bytes32 optimizedTokenOutHash = optimized.hashTokenOut(emptyTokenOut);
+        assertEq(originalTokenOutHash, optimizedTokenOutHash, "Empty tokenOut hash mismatch");
+
+        Types.Order memory emptyOrder = Types.Order({
+            sponsor: address(0x1),
+            recipient: address(0x2),
+            nonce: 1,
+            expires: block.timestamp + 1000,
+            fillDeadline: block.timestamp + 500,
+            notarizedChainId: 1,
+            targetChainId: 1,
+            tokenIn: new uint256[2][](0),
+            tokenOut: new uint256[2][](0),
+            preClaimOps: Types.Operation({ data: "" }),
+            targetOps: Types.Operation({ data: "" }),
+            qualifier: ""
+        });
+        bytes32 originalCompactHash = original.hashCompact(emptyOrder, emptyElements);
+        bytes32 optimizedCompactHash = optimized.hashCompact(emptyOrder, emptyElements);
+        assertEq(originalCompactHash, optimizedCompactHash, "Empty compact hash mismatch");
+    }
+
+    function testLogEmptyArrayHashes() public view {
+        uint256[2][] memory emptyTokenIn = new uint256[2][](0);
+        uint256[2][] memory emptyTokenOut = new uint256[2][](0);
+
+        // Compute what the original implementation returns for empty arrays
+        bytes32 originalTokenInHash = original.hashTokenIn(emptyTokenIn);
+        bytes32 originalTokenOutHash = original.hashTokenOut(emptyTokenOut);
+
+        console2.log("=== Empty Array Hash Constants ===");
+        console2.log("EMPTY_TOKEN_IN_HASH:");
+        console2.logBytes32(originalTokenInHash);
+        console2.log("EMPTY_TOKEN_OUT_HASH:");
+        console2.logBytes32(originalTokenOutHash);
+
+        // Verify these match the existing NO_EXEC constant (should be the same)
+        bytes32 expectedEmptyHash = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470;
+        console2.log("Current NO_EXEC constant:");
+        console2.logBytes32(expectedEmptyHash);
+
+        // Both should match since they're both empty array hashes
+        assertEq(originalTokenInHash, expectedEmptyHash, "Empty token in hash should match NO_EXEC");
+        assertEq(originalTokenOutHash, expectedEmptyHash, "Empty token out hash should match NO_EXEC");
+    }
+
+    function testBenchmark_ScalingPerformance() public {
+        console2.log("=== Scaling Performance Benchmark ===");
+
+        uint256[] memory sizes = new uint256[](4);
+        sizes[0] = 1;
+        sizes[1] = 5;
+        sizes[2] = 10;
+        sizes[3] = 20;
+
+        for (uint256 s = 0; s < sizes.length; s++) {
+            uint256 size = sizes[s];
+            uint256[2][] memory tokenIn = new uint256[2][](size);
+
+            for (uint256 i = 0; i < size; i++) {
+                tokenIn[i] = [uint256(uint160(address(uint160(0x123 + i)))) | (uint256(0x456 + i) << 160), 1000 + i];
+            }
+
+            uint256 originalGas = original.measureTokenInGas(tokenIn);
+            uint256 optimizedGas = optimized.measureTokenInGas(tokenIn);
+
+            console2.log("Size:", size);
+            console2.log("  Original gas:", originalGas);
+            console2.log("  Optimized gas:", optimizedGas);
+            console2.log("  Savings:", ((originalGas - optimizedGas) * 100) / originalGas, "%");
+            console2.log("  Gas per token (original):", originalGas / size);
+            console2.log("  Gas per token (optimized):", optimizedGas / size);
+            console2.log("---");
+        }
+    }
+}

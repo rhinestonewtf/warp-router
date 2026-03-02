@@ -1,0 +1,178 @@
+import "@rhinestone/compact-utils/src/tests/Environment.sol";
+import "@rhinestone/compact-utils/src/arbiters/samechain/SameChainAdapter.sol";
+import { MODULE_TYPE_EXECUTOR } from "modulekit/accounts/common/interfaces/IERC7579Module.sol";
+import { IntentExecutor } from "@rhinestone/compact-utils/src/executor/IntentExecutor.sol";
+
+contract SameChainJITTest is CompactEnvironment {
+    using ModuleKitHelpers for *;
+    using TestHelperLib for *;
+    using Types for Execution[];
+
+    struct UserIntent {
+        address sponsor;
+        uint256 nonce;
+        uint256 expires;
+        address arbiter;
+        uint256 chainId;
+        Element element;
+        bytes32 permit2Hash;
+        bytes32 digest;
+        bytes userSig;
+    }
+
+    UserIntent $intent;
+
+    SameChainAdapter adapter;
+    address arbiter;
+
+    function setUp() public virtual {
+        _deployCompact();
+        _deploySmartAccount({ create: true });
+        _setEmissary(env.smartAccount1, env.eoa);
+
+        env.token1.mint(env.smartAccount1.account, 100);
+
+        adapter = env.sameChainAdapter;
+        arbiter = address(adapter.ARBITER());
+        _setFillRoute(SameChainAdapter.samechain_permit2_handleFill.selector, address(adapter));
+
+        // test
+        _sampleExecERC20(env.token2, 10);
+
+        address recipient = env.smartAccount1.account;
+        address sponsor = env.smartAccount1.account;
+
+        uint256 notarizedChain = chains.originChain1;
+
+        // We need to redeploy intentExecutor to the notarized chain here because it
+        // creates a domain separator in the constructor
+        vm.chainId(notarizedChain);
+        vm.prank(env.smartAccount1.account);
+        address redeployedExecutor =
+            address(new IntentExecutor(address(env.router), address(env.compact), address(env.allocator), address(ADDRESSBOOK)));
+        // etch the code of the redeployed executor to the original executor address
+        vm.etch(address(env.intentExecutor), redeployedExecutor.code);
+
+        Execution[] memory targetExecutions = new Execution[](1);
+        targetExecutions[0] =
+            Execution({ target: address(env.token2), value: 0, callData: abi.encodeCall(IERC20.transfer, (address(env.target), 20)) });
+
+        $intent = UserIntent({
+            sponsor: env.smartAccount1.account,
+            nonce: 1337,
+            expires: 4141,
+            chainId: chains.originChain1,
+            arbiter: arbiter,
+            element: Element({
+                arbiter: arbiter,
+                chainId: notarizedChain,
+                idsAndAmounts: [toId(env.token1), 100].into(),
+                mandate: Mandate({
+                    target: Target({
+                        recipient: recipient,
+                        tokenOut: [toId(env.token2), 20].into(),
+                        targetChain: notarizedChain,
+                        fillExpiry: uint32(block.timestamp + 1 hours)
+                    }),                    minGas: 0,
+                    originOps: intent.noExec,
+                    destOps: targetExecutions,
+                    q: ""
+                })
+            }),
+            permit2Hash: bytes32(0),
+            digest: bytes32(0),
+            userSig: ""
+        });
+
+        $intent.permit2Hash = hashPermit2($intent.sponsor, $intent.nonce, $intent.expires, $intent.arbiter, $intent.element);
+        $intent.digest = _hashTypedDataPermit2(notarizedChain, $intent.permit2Hash);
+        $intent.userSig = _signOwnableValidator(env.eoa, $intent.digest);
+
+        // set permit2 approvals
+
+        vm.startPrank(env.smartAccount1.account);
+        env.token1.approve(address(env.permit2), type(uint256).max);
+        vm.stopPrank();
+    }
+
+    function test_samechainJITSig() public {
+        Types.Order memory order = _getOrder($intent.sponsor, $intent.nonce, $intent.expires, $intent.arbiter, $intent.element, 300_000);
+        vm.chainId(order.notarizedChainId);
+
+        uint256 gas = _fill({
+            chainId: order.notarizedChainId,
+            relayerContext: abi.encodePacked(env.solver.addr),
+            adapterCalldata: abi.encodeCall(
+                SameChainAdapter.samechain_permit2_handleFill,
+                (SameChainAdapter.FillDataPermit2({ order: order, userSigs: Types.Signatures($intent.userSig, "") }))
+            )
+        });
+        console2.log("gas", gas);
+    }
+
+    function test_samechainJIT_withPreClaimOps() public {
+        // Setup pre-claim operations - approve token3 for some contract
+        Execution[] memory preClaimOps = new Execution[](2);
+        preClaimOps[0] =
+            Execution({ target: address(env.token3), value: 0, callData: abi.encodeCall(IERC20.approve, (address(env.target), 50 ether)) });
+        preClaimOps[1] = Execution({ target: address(env.target), value: 0, callData: abi.encodeCall(MockTarget.targetFn, (12_345)) });
+
+        // Mint token3 to the account so it can approve
+        env.token3.mint(env.smartAccount1.account, 100 ether);
+
+        // Create a new intent with pre-claim operations
+        UserIntent storage intentWithPreClaim = $intent;
+        intentWithPreClaim.element.mandate.originOps = preClaimOps;
+        intentWithPreClaim.nonce = 1338; // Different nonce to avoid conflict
+
+        // Recompute hashes with pre-claim operations included
+        intentWithPreClaim.permit2Hash = hashPermit2(
+            intentWithPreClaim.sponsor,
+            intentWithPreClaim.nonce,
+            intentWithPreClaim.expires,
+            intentWithPreClaim.arbiter,
+            intentWithPreClaim.element
+        );
+        intentWithPreClaim.digest = _hashTypedDataPermit2(intentWithPreClaim.chainId, intentWithPreClaim.permit2Hash);
+        intentWithPreClaim.userSig = _signOwnableValidator(env.eoa, intentWithPreClaim.digest);
+
+        // Convert to order
+        Types.Order memory order = _getOrder(
+            intentWithPreClaim.sponsor,
+            intentWithPreClaim.nonce,
+            intentWithPreClaim.expires,
+            intentWithPreClaim.arbiter,
+            intentWithPreClaim.element
+        );
+
+        // Check initial state
+        uint256 token3AllowanceBefore = env.token3.allowance(env.smartAccount1.account, address(env.target));
+        uint256 targetParamBefore = env.target.param();
+
+        assertEq(token3AllowanceBefore, 0, "Token3 allowance should be 0 initially");
+
+        vm.chainId(order.notarizedChainId);
+
+        // Execute the fill with pre-claim operations
+        uint256 gas = _fill({
+            chainId: order.notarizedChainId,
+            relayerContext: abi.encodePacked(env.solver.addr),
+            adapterCalldata: abi.encodeCall(
+                SameChainAdapter.samechain_permit2_handleFill,
+                (SameChainAdapter.FillDataPermit2({ order: order, userSigs: Types.Signatures(intentWithPreClaim.userSig, "") }))
+            )
+        });
+
+        // Verify pre-claim operations were executed
+        uint256 token3AllowanceAfter = env.token3.allowance(env.smartAccount1.account, address(env.target));
+        uint256 targetParamAfter = env.target.param();
+
+        assertEq(token3AllowanceAfter, 50 ether, "Token3 should be approved for 50 ether");
+        assertEq(targetParamAfter, 12_345, "Target param should be set by pre-claim op");
+
+        // Verify the main transfer still happened
+        assertEq(env.token2.balanceOf(address(env.target)), 20, "Target should have received token2");
+
+        console2.log("gas with pre-claim ops:", gas);
+    }
+}

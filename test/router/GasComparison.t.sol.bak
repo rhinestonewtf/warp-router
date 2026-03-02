@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.27;
+
+import { Test } from "forge-std/Test.sol";
+import { console } from "forge-std/console.sol";
+import { AdapterLib } from "src/router/lib/AdapterLib.sol";
+
+contract MockAdapter {
+    function testFunction(uint256 a, address b) external pure returns (bytes4) {
+        return this.testFunction.selector;
+    }
+}
+
+contract MockRouterForGasTest {
+    // This is the original Solidity implementation from RouterLogic
+    function callAdapterWithrelayerContext_Solidity(
+        address adapter,
+        bytes calldata relayerContext,
+        bytes calldata adapterCalldata
+    )
+        external
+        returns (bytes4 ret)
+    {
+        // Original implementation using abi.encodePacked
+        (bool success, bytes memory _ret) =
+            adapter.delegatecall(abi.encodePacked(adapterCalldata, relayerContext, uint256(relayerContext.length)));
+        ret = abi.decode(_ret, (bytes4));
+        require(success);
+    }
+}
+
+contract GasComparisonTest is Test {
+    MockAdapter mockAdapter;
+    MockRouterForGasTest solidityRouter;
+
+    function setUp() public {
+        mockAdapter = new MockAdapter();
+        solidityRouter = new MockRouterForGasTest();
+    }
+
+    function test_gasComparison_basic() public {
+        bytes memory relayerContext =
+            abi.encodePacked(address(0x1111111111111111111111111111111111111111), address(0x2222222222222222222222222222222222222222));
+        bytes memory adapterCalldata = abi.encodeCall(mockAdapter.testFunction, (123, address(0xdead)));
+
+        // Measure Solidity implementation
+        uint256 solidityGasStart = gasleft();
+        bytes4 solidityResult = solidityRouter.callAdapterWithrelayerContext_Solidity(address(mockAdapter), relayerContext, adapterCalldata);
+        uint256 solidityGasUsed = solidityGasStart - gasleft();
+
+        // Measure assembly implementation
+        uint256 assemblyGasStart = gasleft();
+        bytes4 assemblyResult = AdapterLib.callAdapterWithrelayerContext(address(mockAdapter), relayerContext, adapterCalldata);
+        uint256 assemblyGasUsed = assemblyGasStart - gasleft();
+
+        // Results should be identical
+        assertEq(assemblyResult, solidityResult);
+
+        // Log gas usage
+        console.log("=== Gas Comparison Results ===");
+        console.log("Solidity implementation gas:", solidityGasUsed);
+        console.log("Assembly implementation gas:", assemblyGasUsed);
+        console.log("Gas savings:", solidityGasUsed - assemblyGasUsed);
+        console.log("Percent savings:", ((solidityGasUsed - assemblyGasUsed) * 100) / solidityGasUsed);
+
+        // Assembly should be more efficient
+        assertTrue(assemblyGasUsed < solidityGasUsed);
+    }
+
+    function test_gasComparison_largeContext() public {
+        bytes memory relayerContext = new bytes(500);
+        for (uint256 i = 0; i < 500; i++) {
+            relayerContext[i] = bytes1(uint8(i % 256));
+        }
+
+        bytes memory adapterCalldata = abi.encodeCall(mockAdapter.testFunction, (456, address(0xbeef)));
+
+        // Measure Solidity implementation
+        uint256 solidityGasStart = gasleft();
+        bytes4 solidityResult = solidityRouter.callAdapterWithrelayerContext_Solidity(address(mockAdapter), relayerContext, adapterCalldata);
+        uint256 solidityGasUsed = solidityGasStart - gasleft();
+
+        // Measure assembly implementation
+        uint256 assemblyGasStart = gasleft();
+        bytes4 assemblyResult = AdapterLib.callAdapterWithrelayerContext(address(mockAdapter), relayerContext, adapterCalldata);
+        uint256 assemblyGasUsed = assemblyGasStart - gasleft();
+
+        // Results should be identical
+        assertEq(assemblyResult, solidityResult);
+
+        // Log gas usage for large context
+        console.log("=== Large Context Gas Comparison ===");
+        console.log("Solidity implementation gas:", solidityGasUsed);
+        console.log("Assembly implementation gas:", assemblyGasUsed);
+        console.log("Gas savings:", solidityGasUsed - assemblyGasUsed);
+        console.log("Percent savings:", ((solidityGasUsed - assemblyGasUsed) * 100) / solidityGasUsed);
+
+        // Assembly should be more efficient
+        assertTrue(assemblyGasUsed < solidityGasUsed);
+    }
+
+    function test_gasComparison_emptyContext() public {
+        bytes memory relayerContext = "";
+        bytes memory adapterCalldata = abi.encodeCall(mockAdapter.testFunction, (789, address(0xcafe)));
+
+        // Measure Solidity implementation
+        uint256 solidityGasStart = gasleft();
+        bytes4 solidityResult = solidityRouter.callAdapterWithrelayerContext_Solidity(address(mockAdapter), relayerContext, adapterCalldata);
+        uint256 solidityGasUsed = solidityGasStart - gasleft();
+
+        // Measure assembly implementation
+        uint256 assemblyGasStart = gasleft();
+        bytes4 assemblyResult = AdapterLib.callAdapterWithrelayerContext(address(mockAdapter), relayerContext, adapterCalldata);
+        uint256 assemblyGasUsed = assemblyGasStart - gasleft();
+
+        // Results should be identical
+        assertEq(assemblyResult, solidityResult);
+
+        // Log gas usage for empty context
+        console.log("=== Empty Context Gas Comparison ===");
+        console.log("Solidity implementation gas:", solidityGasUsed);
+        console.log("Assembly implementation gas:", assemblyGasUsed);
+        console.log("Gas savings:", solidityGasUsed - assemblyGasUsed);
+        console.log("Percent savings:", ((solidityGasUsed - assemblyGasUsed) * 100) / solidityGasUsed);
+
+        // Assembly should be more efficient
+        assertTrue(assemblyGasUsed < solidityGasUsed);
+    }
+}

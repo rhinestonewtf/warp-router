@@ -1,0 +1,494 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import { RhinestoneModuleKit, ModuleKitHelpers, AccountInstance } from "modulekit/ModuleKit.sol";
+import { Test } from "forge-std/Test.sol";
+import { console2 } from "forge-std/console2.sol";
+import { Execution } from "modulekit/integrations/ERC7579Exec.sol";
+import { MODULE_TYPE_EXECUTOR } from "modulekit/accounts/common/interfaces/IERC7579Module.sol";
+import { ISignedOperation, SignedOperation, SignedOperationHashLib } from "src/executor/SignedOperations/SignedOperation.sol";
+import { CompactEnvironment } from "src/tests/Environment.sol";
+import { IERC20 } from "forge-std/interfaces/IERC20.sol";
+import { MockTarget } from "src/tests/MockTarget.sol";
+import { MultiCallAdapter } from "src/arbiters/multicall/MultiCallAdapter.sol";
+
+contract SignedOperationHashHelper {
+    using SignedOperationHashLib for ISignedOperation.MultiChainOps;
+
+    function hash(ISignedOperation.MultiChainOps calldata ops) external view returns (bytes32) {
+        (bytes32 _hash,) = ops.hash();
+        return _hash;
+    }
+
+    function hashChainOps(uint256 chainId, uint256 nonce, Execution[] calldata ops) external pure returns (bytes32) {
+        return SignedOperationHashLib.hashChainOps(chainId, nonce, ops);
+    }
+}
+
+contract MockAccount {
+    function execute(address target, uint256 value, bytes calldata callData) external payable {
+        (bool success,) = target.call{ value: value }(callData);
+        require(success, "MockAccount: execution failed");
+    }
+
+    receive() external payable { }
+}
+
+contract IntentExecutorSignedOpsIntegrationTest is CompactEnvironment {
+    using ModuleKitHelpers for *;
+    using SignedOperationHashLib for ISignedOperation.MultiChainOps;
+
+    error InvalidSignature();
+    error AlreadyExecuted();
+
+    SignedOperationHashHelper hashHelper;
+
+    function setUp() public {
+        _deployCompact();
+        _deploySmartAccount({ create: true });
+        _setEmissary(env.smartAccount1, env.eoa);
+        _setEmissary(env.smartAccount2, env.orchestrator);
+
+        // Deploy hash helper
+        hashHelper = new SignedOperationHashHelper();
+
+        // Fund accounts with tokens
+        env.token1.mint(env.smartAccount1.account, 1000 ether);
+        env.token2.mint(env.smartAccount1.account, 1000 ether);
+        env.token3.mint(env.smartAccount1.account, 1000 ether);
+
+        env.token1.mint(env.smartAccount2.account, 1000 ether);
+        env.token2.mint(env.smartAccount2.account, 1000 ether);
+        env.token3.mint(env.smartAccount2.account, 1000 ether);
+    }
+
+    function test_executeMultichainOps_singleOperation() public {
+        // Test single operation execution
+        address account = env.smartAccount1.account;
+        uint256 amount = 100 ether;
+
+        Execution[] memory ops = new Execution[](1);
+        ops[0] = Execution({ target: address(env.token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (env.solver.addr, amount)) });
+
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 1,
+            ops: ops,
+            signature: ""
+        });
+
+        // Hash and sign
+        bytes32 hash = hashHelper.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        // Record balances before
+        uint256 balanceBefore = env.token1.balanceOf(env.solver.addr);
+        uint256 accountBalanceBefore = env.token1.balanceOf(account);
+
+        // Execute
+        env.intentExecutor.executeMultichainOps(multichainOps);
+
+        // Verify execution
+        assertEq(env.token1.balanceOf(env.solver.addr), balanceBefore + amount);
+        assertEq(env.token1.balanceOf(account), accountBalanceBefore - amount);
+    }
+
+    function test_executeMultichainOps_batchOperations() public {
+        // Test batch operations execution
+        address account = env.smartAccount1.account;
+        uint256 amount1 = 50 ether;
+        uint256 amount2 = 75 ether;
+
+        Execution[] memory ops = new Execution[](3);
+        ops[0] =
+            Execution({ target: address(env.token1), value: 0, callData: abi.encodeCall(IERC20.approve, (address(env.target), amount1)) });
+        ops[1] = Execution({
+            target: address(env.target),
+            value: 0,
+            callData: abi.encodeCall(MockTarget.deposit, (IERC20(address(env.token1)), amount1))
+        });
+        ops[2] = Execution({ target: address(env.token2), value: 0, callData: abi.encodeCall(IERC20.transfer, (env.solver.addr, amount2)) });
+
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 2,
+            ops: ops,
+            signature: ""
+        });
+
+        // Hash and sign
+        bytes32 hash = hashHelper.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        // Record balances before
+        uint256 token1BalanceBefore = env.token1.balanceOf(account);
+        uint256 targetToken1BalanceBefore = env.token1.balanceOf(address(env.target));
+        uint256 token2BalanceBefore = env.token2.balanceOf(env.solver.addr);
+
+        // Execute
+        env.intentExecutor.executeMultichainOps(multichainOps);
+
+        // Verify executions
+        // Token1 was transferred to the target via deposit
+        assertEq(env.token1.balanceOf(account), token1BalanceBefore - amount1);
+        assertEq(env.token1.balanceOf(address(env.target)), targetToken1BalanceBefore + amount1);
+        // Token2 was transferred to the solver
+        assertEq(env.token2.balanceOf(env.solver.addr), token2BalanceBefore + amount2);
+    }
+
+    function test_executeMultichainOps_multiChainSetup() public {
+        // Test multichain operation setup
+        address account = env.smartAccount1.account;
+        uint256 nonce = 3;
+
+        // Chain 1 operations
+        Execution[] memory chain1Ops = new Execution[](1);
+        chain1Ops[0] =
+            Execution({ target: address(env.token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (env.solver.addr, 10 ether)) });
+
+        // Chain 2 operations
+        Execution[] memory chain2Ops = new Execution[](1);
+        chain2Ops[0] = Execution({
+            target: address(env.token2),
+            value: 0,
+            callData: abi.encodeCall(IERC20.transfer, (env.orchestrator.addr, 20 ether))
+        });
+
+        // Hash operations for each chain
+        bytes32 chain1Hash = hashHelper.hashChainOps(chains.originChain1, nonce, chain1Ops);
+        bytes32 chain2Hash = hashHelper.hashChainOps(chains.originChain2, nonce, chain2Ops);
+
+        // Current chain operations
+        Execution[] memory currentChainOps = new Execution[](1);
+        currentChainOps[0] = Execution({
+            target: address(env.token3),
+            value: 0,
+            callData: abi.encodeCall(IERC20.transfer, (env.atomicFillSigner.addr, 30 ether))
+        });
+
+        bytes32[] memory otherChains = new bytes32[](2);
+        otherChains[0] = chain1Hash;
+        otherChains[1] = chain2Hash;
+
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: account,
+            chainIndex: 2, // Current chain is at index 2
+            otherChains: otherChains,
+            nonce: nonce,
+            ops: currentChainOps,
+            signature: ""
+        });
+
+        // Hash and sign
+        bytes32 hash = hashHelper.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        // Execute current chain operations
+        env.intentExecutor.executeMultichainOps(multichainOps);
+
+        // Verify execution
+        assertEq(env.token3.balanceOf(env.atomicFillSigner.addr), 30 ether);
+    }
+
+    function test_executeMultichainOps_revertInvalidSignature() public {
+        address account = env.smartAccount1.account;
+
+        Execution[] memory ops = new Execution[](1);
+        ops[0] =
+            Execution({ target: address(env.token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (env.solver.addr, 100 ether)) });
+
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 4,
+            ops: ops,
+            signature: ""
+        });
+
+        // Hash with correct account
+        bytes32 hash = hashHelper.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+
+        // Create a signature with wrong validator address
+        multichainOps.signature = abi.encodePacked(address(0xdead), _signHash(env.eoa, digest));
+
+        // Should revert with InvalidSignature from SignedOperation contract
+        vm.expectRevert(SignedOperation.InvalidSignature.selector);
+        env.intentExecutor.executeMultichainOps(multichainOps);
+    }
+
+    function test_executeMultichainOps_revertNonceReuse() public {
+        address account = env.smartAccount1.account;
+        uint256 nonce = 5;
+
+        Execution[] memory ops = new Execution[](1);
+        ops[0] =
+            Execution({ target: address(env.token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (env.solver.addr, 50 ether)) });
+
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: nonce,
+            ops: ops,
+            signature: ""
+        });
+
+        // Hash and sign
+        bytes32 hash = hashHelper.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        // Execute first time - should succeed
+        env.intentExecutor.executeMultichainOps(multichainOps);
+
+        // Try to execute again with same nonce - should revert
+        vm.expectRevert("Nonce already used");
+        env.intentExecutor.executeMultichainOps(multichainOps);
+    }
+
+    function test_executeMultichainOps_withETHTransfer() public {
+        address account = env.smartAccount1.account;
+
+        // Fund account with ETH
+        vm.deal(account, 10 ether);
+
+        Execution[] memory ops = new Execution[](2);
+        ops[0] = Execution({ target: env.solver.addr, value: 1 ether, callData: "" });
+        ops[1] = Execution({ target: address(env.target), value: 0.5 ether, callData: abi.encodeCall(MockTarget.targetFn, (12_345)) });
+
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 6,
+            ops: ops,
+            signature: ""
+        });
+
+        // Hash and sign
+        bytes32 hash = hashHelper.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        uint256 solverBalanceBefore = env.solver.addr.balance;
+        uint256 targetBalanceBefore = address(env.target).balance;
+
+        // Execute
+        env.intentExecutor.executeMultichainOps(multichainOps);
+
+        // Verify ETH transfers
+        assertEq(env.solver.addr.balance, solverBalanceBefore + 1 ether);
+        assertEq(address(env.target).balance, targetBalanceBefore + 0.5 ether);
+    }
+
+    function test_executeMultichainOps_differentAccounts() public {
+        // Test operations from different accounts
+        uint256 amount1 = 25 ether;
+        uint256 amount2 = 35 ether;
+
+        // Account 1 operations
+        Execution[] memory ops1 = new Execution[](1);
+        ops1[0] =
+            Execution({ target: address(env.token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (env.solver.addr, amount1)) });
+
+        ISignedOperation.MultiChainOps memory multichainOps1 = ISignedOperation.MultiChainOps({
+            account: env.smartAccount1.account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 7,
+            ops: ops1,
+            signature: ""
+        });
+
+        // Account 2 operations
+        Execution[] memory ops2 = new Execution[](1);
+        ops2[0] = Execution({
+            target: address(env.token2),
+            value: 0,
+            callData: abi.encodeCall(IERC20.transfer, (env.orchestrator.addr, amount2))
+        });
+
+        ISignedOperation.MultiChainOps memory multichainOps2 = ISignedOperation.MultiChainOps({
+            account: env.smartAccount2.account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 1,
+            ops: ops2,
+            signature: ""
+        });
+
+        // Hash and sign for account 1
+        bytes32 hash1 = hashHelper.hash(multichainOps1);
+        bytes32 digest1 = env.intentExecutor.digest(hash1);
+        multichainOps1.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest1));
+
+        // Hash and sign for account 2
+        bytes32 hash2 = hashHelper.hash(multichainOps2);
+        bytes32 digest2 = env.intentExecutor.digest(hash2);
+        multichainOps2.signature = abi.encodePacked(address(env.smartAccount2.defaultValidator), _signHash(env.orchestrator, digest2));
+
+        // Record balances before
+        uint256 solverToken1BalanceBefore = env.token1.balanceOf(env.solver.addr);
+        uint256 orchestratorToken2BalanceBefore = env.token2.balanceOf(env.orchestrator.addr);
+
+        // Execute both
+        env.intentExecutor.executeMultichainOps(multichainOps1);
+        env.intentExecutor.executeMultichainOps(multichainOps2);
+
+        // Verify executions
+        assertEq(env.token1.balanceOf(env.solver.addr), solverToken1BalanceBefore + amount1);
+        assertEq(env.token2.balanceOf(env.orchestrator.addr), orchestratorToken2BalanceBefore + amount2);
+    }
+
+    function testFuzz_executeMultichainOps_variousAmounts(uint256 amount) public {
+        amount = bound(amount, 1 ether, 100 ether);
+        address account = env.smartAccount1.account;
+
+        Execution[] memory ops = new Execution[](1);
+        ops[0] = Execution({ target: address(env.token1), value: 0, callData: abi.encodeCall(IERC20.transfer, (env.solver.addr, amount)) });
+
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 100 + amount, // Unique nonce based on amount
+            ops: ops,
+            signature: ""
+        });
+
+        // Hash and sign
+        bytes32 hash = hashHelper.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        uint256 balanceBefore = env.token1.balanceOf(env.solver.addr);
+
+        // Execute
+        env.intentExecutor.executeMultichainOps(multichainOps);
+
+        // Verify
+        assertEq(env.token1.balanceOf(env.solver.addr), balanceBefore + amount);
+    }
+
+    function testFuzz_executeMultichainOps_multipleOperations(uint8 numOps) public {
+        numOps = uint8(bound(numOps, 1, 10));
+        address account = env.smartAccount1.account;
+
+        Execution[] memory ops = new Execution[](numOps);
+        uint256 totalAmount = 0;
+
+        for (uint8 i = 0; i < numOps; i++) {
+            uint256 amount = uint256(i + 1) * 1 ether;
+            totalAmount += amount;
+            ops[i] = Execution({
+                target: address(env.token1),
+                value: 0,
+                callData: abi.encodeCall(IERC20.transfer, (address(uint160(env.solver.addr) + i), amount))
+            });
+        }
+
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 1000 + numOps,
+            ops: ops,
+            signature: ""
+        });
+
+        // Hash and sign
+        bytes32 hash = hashHelper.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        uint256 accountBalanceBefore = env.token1.balanceOf(account);
+
+        // Execute
+        env.intentExecutor.executeMultichainOps(multichainOps);
+
+        // Verify total amount transferred
+        assertEq(env.token1.balanceOf(account), accountBalanceBefore - totalAmount);
+    }
+
+    function test_executeMultichainOps_withMulticallJITClaim() public {
+        // Test signed operation combined with multicall JIT claim
+        address account = env.smartAccount1.account;
+        uint256 signedOpAmount = 10 ether;
+        uint256 jitClaimAmount = 2 ether;
+
+        // Create a separate mock account that will hold tokens for the JIT claim
+        MockAccount tokenHolder = new MockAccount();
+        env.token1.mint(address(tokenHolder), jitClaimAmount);
+
+        // 1. Create signed operation that calls target function
+        Execution[] memory ops = new Execution[](1);
+        ops[0] = Execution({ target: address(env.target), value: 0, callData: abi.encodeCall(MockTarget.targetFn, (12_345)) });
+
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 100,
+            ops: ops,
+            signature: ""
+        });
+
+        // Hash and sign the operation
+        bytes32 hash = hashHelper.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        // 2. Prepare JIT claim data using the MockAccount pattern
+        uint256[2] memory tokenInPair = [toId(env.token1), jitClaimAmount];
+        uint256[2][] memory tokenIn = new uint256[2][](1);
+        tokenIn[0] = tokenInPair;
+
+        // Create executions for JIT claim - MockAccount transfers tokens to MultiCall
+        Execution[] memory jitClaimExecutions = new Execution[](2);
+        jitClaimExecutions[0] =
+            Execution({ target: address(env.target), value: 0, callData: abi.encodeCall(MockTarget.targetFn, (99_999)) });
+        jitClaimExecutions[1] = Execution({
+            target: address(tokenHolder),
+            value: 0,
+            callData: abi.encodeCall(
+                MockAccount.execute,
+                (address(env.token1), 0, abi.encodeCall(IERC20.transfer, (address(env.router.MULTICALL()), jitClaimAmount)))
+            )
+        });
+
+        MultiCallAdapter.JITClaimData memory jitClaimData =
+            MultiCallAdapter.JITClaimData({ tokenIn: tokenIn, multicalls: jitClaimExecutions });
+
+        // Record balances before execution
+        uint256 solverToken1BalanceBefore = env.token1.balanceOf(env.solver.addr);
+        uint256 tokenHolderBalanceBefore = env.token1.balanceOf(address(tokenHolder));
+
+        // 3. Execute the signed operation
+        env.intentExecutor.executeMultichainOps(multichainOps);
+
+        // Verify signed operation executed
+        assertEq(env.target.param(), 12_345);
+
+        // 4. Execute JIT claim separately
+        bytes memory relayerContext = abi.encodePacked(env.solver.addr, env.solver.addr);
+        _claim(block.chainid, relayerContext, abi.encodeCall(MultiCallAdapter.multicall_handleJITClaim, (jitClaimData)));
+
+        // Verify JIT claim executed
+        assertEq(env.target.param(), 99_999); // Should be updated by JIT claim execution
+
+        // Verify solver received compensation tokens
+        assertEq(env.token1.balanceOf(env.solver.addr), solverToken1BalanceBefore + jitClaimAmount);
+
+        // Verify tokens were transferred from the token holder
+        assertEq(env.token1.balanceOf(address(tokenHolder)), tokenHolderBalanceBefore - jitClaimAmount);
+    }
+}

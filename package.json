@@ -1,0 +1,74 @@
+{
+  "name": "@rhinestone/compact-utils",
+  "version": "1.0.5",
+  "description": "",
+  "license": "BUSL-1.1",
+  "author": {
+    "name": "Rhinestone",
+    "url": "https://rhinestone.wtf"
+  },
+  "scripts": {
+    "build": "forge build",
+    "build:optimized": "FOUNDRY_PROFILE=optimized forge build",
+    "build:smt": "FOUNDRY_PROFILE=smt forge build",
+    "clean": "rm -rf broadcast cache docs out out-optimized out-svg",
+    "gas:report": "forge test --gas-report --mp \"./test/integration/**/*.sol\" --nmt \"test(Fuzz)?_RevertWhen_\\w{1,}?\"",
+    "gas:snapshot": "forge snapshot --mp \"./test/integration/**/*.sol\" --nmt \"test(Fuzz)?_RevertWhen_\\w{1,}?\"",
+    "gas:snapshot:optimized": "pnpm run build:optimized && FOUNDRY_PROFILE=test-optimized forge snapshot --mp \"./test/integration/**/*.sol\" --nmt \"test(Fork)?(Fuzz)?_RevertWhen_\\w{1,}?\"",
+    "lint": "pnpm run lint:sol && bun run prettier:check",
+    "lint:sol": "forge fmt --check && pnpm solhint \"{script,src,test}/**/*.sol\"",
+    "prettier:check": "prettier --check \"**/*.{json,md,svg,yml}\"",
+    "prettier:write": "prettier --write \"**/*.{json,md,svg,yml}\"",
+    "test": "forge test",
+    "test:lite": "FOUNDRY_PROFILE=lite forge test",
+    "test:optimized": "pnpm run build:optimized && FOUNDRY_PROFILE=test-optimized forge test",
+    "deploy": "forge script script/DeployCompactUtils.s.sol",
+    "deploy:all": "./script/deploy-all.sh",
+    "deploy:parallel": "./script/deploy-parallel.sh",
+    "deploy:base": "forge script script/DeployCompactUtils.s.sol --rpc-url base --broadcast --verify",
+    "deploy:optimism": "forge script script/DeployCompactUtils.s.sol --rpc-url optimism --broadcast --verify",
+    "deploy:mainnet": "forge script script/DeployCompactUtils.s.sol --rpc-url mainnet --broadcast --verify"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "@excessivelySafeCall": "github:rhinestonewtf/ExcessivelySafeCall",
+    "@rhinestone/checknsignatures": "github:rhinestonewtf/checknsignatures",
+    "@rhinestone/modulekit": "github:rhinestonewtf/modulekit",
+    "@rhinestone/eip712": "github:rhinestonewtf/eip712.rs",
+    "@uniswap/permit2": "github:Uniswap/permit2",
+    "@uniswap/the-compact": "github:Uniswap/the-compact#v1",
+    "solady": "github:Vectorized/solady",
+    "safesingleton": "zeroknots/safe-singleton-deployer-sol",
+    "ethers": "^6.14.3",
+    "solmate": "github:transmissions11/solmate",
+    "tstorish": "github:ProjectOpenSea/tstorish",
+    "@openzeppelin/contracts": "^5.3.0",
+    "FreshCryptoLib": "github:rdubois-crypto/FreshCryptoLib",
+    "webauthn-sol": "github:rhinestonewtf/webauthn-sol"
+  },
+  "files": [
+    "src",
+    "test",
+    "artifacts",
+    "script",
+    "package.json",
+    "foundry.toml",
+    "remappings.txt"
+  ],
+  "homepage": "https://docs.rhinestone.wtf/module-template",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rhinestonewtf/module-template.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rhinestonewtf/module-template/issues"
+  },
+  "keywords": [
+    "account abstraction",
+    "smart account modules",
+    "module template"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

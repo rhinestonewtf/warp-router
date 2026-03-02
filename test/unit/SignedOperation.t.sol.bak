@@ -1,0 +1,89 @@
+import { RhinestoneModuleKit, ModuleKitHelpers, AccountInstance } from "modulekit/ModuleKit.sol";
+import { Test } from "forge-std/Test.sol";
+import { console2 } from "forge-std/console2.sol";
+import { Execution } from "modulekit/integrations/ERC7579Exec.sol";
+import { MODULE_TYPE_EXECUTOR } from "modulekit/accounts/common/interfaces/IERC7579Module.sol";
+import { ISignedOperation, SignedOperationHashLib } from "src/executor/SignedOperations/SignedOperation.sol";
+import { CompactEnvironment } from "src/tests/Environment.sol";
+
+contract SignedOperationHasher {
+    using SignedOperationHashLib for ISignedOperation.MultiChainOps;
+
+    function hash(ISignedOperation.MultiChainOps calldata ops) external returns (bytes32) {
+        (bytes32 _hash,) = ops.hash();
+        return _hash;
+    }
+
+    function hashChainSegment(uint256 chainId, uint256 nonce, Execution[] calldata ops) external returns (bytes32) {
+        return SignedOperationHashLib.hashChainOps(chainId, nonce, ops);
+    }
+
+    function hashSegments(address account, bytes32[] calldata allSegments) external returns (bytes32) {
+        return SignedOperationHashLib.hash(account, allSegments);
+    }
+}
+
+contract SignedOperationTest is CompactEnvironment {
+    using ModuleKitHelpers for *;
+
+    AccountInstance instance;
+
+    SignedOperationHasher _hasher;
+
+    function setUp() public {
+        _deployCompact();
+        _deploySmartAccount({ create: true });
+        _setEmissary(env.smartAccount1, env.eoa);
+
+        env.token2.mint(env.smartAccount1.account, 100 ether);
+        _sampleExecERC20(env.token2, 20);
+
+        _hasher = new SignedOperationHasher();
+    }
+
+    function test_singleChain() public {
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: env.smartAccount1.account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 1,
+            ops: intent.targetExecutions,
+            signature: ""
+        });
+        bytes32 hash = _hasher.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        env.intentExecutor.executeMultichainOps(multichainOps);
+    }
+
+    function test_multiChain() public {
+        uint256 nonce = 1337;
+        _sampleExecERC20(env.token2, 20);
+        Execution[] memory chain1Exec = intent.targetExecutions;
+        bytes32 chain1Hash = _hasher.hashChainSegment(chains.originChain1, nonce, chain1Exec);
+
+        _sampleExecERC20(env.token3, 20);
+        Execution[] memory chain2Exec = intent.targetExecutions;
+        bytes32 chain2Hash = _hasher.hashChainSegment(chains.originChain2, nonce, chain2Exec);
+
+        bytes32[] memory allSegments = new bytes32[](2);
+        allSegments[0] = chain1Hash;
+        allSegments[1] = chain2Hash;
+        ISignedOperation.MultiChainOps memory multichainOps = ISignedOperation.MultiChainOps({
+            account: env.smartAccount1.account,
+            chainIndex: 0,
+            otherChains: new bytes32[](0),
+            nonce: 1,
+            ops: intent.targetExecutions,
+            signature: ""
+        });
+        bytes32 hash = _hasher.hash(multichainOps);
+        bytes32 digest = env.intentExecutor.digest(hash);
+
+        multichainOps.signature = abi.encodePacked(address(env.smartAccount1.defaultValidator), _signHash(env.eoa, digest));
+
+        env.intentExecutor.executeMultichainOps(multichainOps);
+    }
+}
