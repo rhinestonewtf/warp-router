@@ -5,7 +5,7 @@
   "license": "BUSL-1.1",
   "author": {
     "name": "Rhinestone",
-    "url": "https://rhinestone.wtf"
+    "url": "https://www.rhinestone.dev"
   },
   "scripts": {
     "build": "forge build",
@@ -55,7 +55,7 @@
     "foundry.toml",
     "remappings.txt"
   ],
-  "homepage": "https://docs.rhinestone.wtf/module-template",
+  "homepage": "https://docs.rhinestone.dev",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rhinestonewtf/module-template.git"
